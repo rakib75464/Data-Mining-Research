@@ -1,0 +1,825 @@
+# =========================================================
+# Imports (add more visualization libraries)
+# =========================================================
+import pandas as pd
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+
+from google.colab import drive
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, LabelEncoder
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report, confusion_matrix
+from sklearn.naive_bayes import GaussianNB
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, IsolationForest
+from sklearn.linear_model import LogisticRegression, Perceptron
+from sklearn.svm import SVC, LinearSVC
+from sklearn.neighbors import KNeighborsClassifier, NearestCentroid
+from sklearn.cluster import KMeans
+from sklearn.dummy import DummyClassifier
+from sklearn.base import BaseEstimator, ClassifierMixin
+from xgboost import XGBClassifier
+from sklearn import tree
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib import cm
+import matplotlib.gridspec as gridspec
+
+# Install necessary packages
+!pip install xgboost -q
+!pip install scikit-learn --upgrade -q
+
+# Set seaborn style
+sns.set_style("whitegrid")
+plt.rcParams['figure.figsize'] = [12, 8]
+plt.rcParams['figure.dpi'] = 100
+
+# =========================================================
+# Mount Google Drive & Load Dataset
+# =========================================================
+drive.mount('/content/drive')
+
+# Update the path if your file is in a subfolder
+df = pd.read_csv("/content/drive/MyDrive/DWDM_DATASET.csv")
+print("Data shape:", df.shape)
+print(df.head())
+print("\nTarget distribution:")
+print(df["target"].value_counts())
+
+# =========================================================
+# Train/Test Split (done ONCE, no scaling yet)
+# =========================================================
+X = df.drop(columns=["target"])
+y = df["target"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+    random_state=42,
+    stratify=y
+)
+
+print("\nTrain shape:", X_train.shape, " Test shape:", X_test.shape)
+print("Train target distribution:", np.bincount(y_train))
+print("Test target distribution:", np.bincount(y_test))
+
+# Columns we consider continuous and want to scale
+numeric_columns = X.select_dtypes(include=[np.number]).columns.tolist()
+columns_to_scale = numeric_columns if numeric_columns else ["age", "trestbps", "chol", "thalach"]
+
+# =========================================================
+# Custom Implementations
+# =========================================================
+
+class CustomKNN:
+    """Custom KNN implementation"""
+    def __init__(self, k=5):
+        self.k = k
+
+    def fit(self, X_train, y_train):
+        self.X_train = np.array(X_train)
+        self.y_train = np.array(y_train)
+
+    def predict(self, X_test):
+        X_test = np.array(X_test)
+        predictions = []
+        for x in X_test:
+            distances = np.sqrt(np.sum((self.X_train - x) ** 2, axis=1))
+            k_indices = np.argsort(distances)[:self.k]
+            k_neighbor_labels = self.y_train[k_indices]
+            predictions.append(np.bincount(k_neighbor_labels).argmax())
+        return np.array(predictions)
+
+class J48Tree(DecisionTreeClassifier):
+    """J48 Tree (similar to C4.5 algorithm)"""
+    def __init__(self, criterion='entropy', max_depth=None, min_samples_split=2):
+        super().__init__(criterion=criterion, max_depth=max_depth,
+                        min_samples_split=min_samples_split, random_state=42)
+
+class GiniTree(DecisionTreeClassifier):
+    """Decision Tree using Gini impurity"""
+    def __init__(self, max_depth=None, min_samples_split=2):
+        super().__init__(criterion='gini', max_depth=max_depth,
+                        min_samples_split=min_samples_split, random_state=42)
+
+class DecisionStump(DecisionTreeClassifier):
+    """Decision Stump - Single level decision tree"""
+    def __init__(self, criterion='gini'):
+        super().__init__(max_depth=1, criterion=criterion, random_state=42)
+
+class AdaptiveNB(GaussianNB):
+    """Adaptive Naive Bayes with adjustable priors"""
+    def __init__(self, priors=None):
+        super().__init__(priors=priors)
+
+class OneRClassifier(BaseEstimator, ClassifierMixin):
+    """One Rule Classifier - Simple rule-based classifier"""
+    def __init__(self):
+        self.best_feature = None
+        self.rules = None
+
+    def fit(self, X, y):
+        X = np.array(X)
+        y = np.array(y)
+        best_accuracy = 0
+
+        for feature_idx in range(X.shape[1]):
+            feature_values = X[:, feature_idx]
+            unique_vals = np.unique(feature_values)
+
+            rules = {}
+            for val in unique_vals:
+                mask = feature_values == val
+                if np.sum(mask) > 0:
+                    rules[val] = np.bincount(y[mask]).argmax()
+
+            # Calculate accuracy for this feature
+            predictions = np.array([rules[val] for val in feature_values])
+            accuracy = np.mean(predictions == y)
+
+            if accuracy > best_accuracy:
+                best_accuracy = accuracy
+                self.best_feature = feature_idx
+                self.rules = rules
+
+        return self
+
+    def predict(self, X):
+        X = np.array(X)
+        feature_values = X[:, self.best_feature]
+        predictions = []
+
+        for val in feature_values:
+            if val in self.rules:
+                predictions.append(self.rules[val])
+            else:
+                # Find closest value
+                closest_val = min(self.rules.keys(), key=lambda x: abs(x - val))
+                predictions.append(self.rules[closest_val])
+
+        return np.array(predictions)
+
+# =========================================================
+# Function to train and evaluate models
+# =========================================================
+
+def evaluate_model(model, X_train_scaled, X_test_scaled, y_train, y_test, model_name):
+    """Train and evaluate a model"""
+    try:
+        # Train the model
+        model.fit(X_train_scaled, y_train)
+
+        # Make predictions
+        y_pred = model.predict(X_test_scaled)
+
+        # Calculate metrics
+        metrics = {
+            'Model': model_name,
+            'Accuracy': accuracy_score(y_test, y_pred),
+            'Precision': precision_score(y_test, y_pred, average='weighted'),
+            'Recall': recall_score(y_test, y_pred, average='weighted'),
+            'F1': f1_score(y_test, y_pred, average='weighted')
+        }
+
+        return metrics, y_pred
+
+    except Exception as e:
+        print(f"Error with {model_name}: {str(e)}")
+        return None, None
+
+# =========================================================
+# Prepare scalers for different model types
+# =========================================================
+
+# For models requiring normalization (KNN, SVM, Perceptron, etc.)
+scaler_minmax = MinMaxScaler()
+X_train_minmax = X_train.copy()
+X_test_minmax = X_test.copy()
+X_train_minmax[columns_to_scale] = scaler_minmax.fit_transform(X_train_minmax[columns_to_scale])
+X_test_minmax[columns_to_scale] = scaler_minmax.transform(X_test_minmax[columns_to_scale])
+
+# For models requiring standardization (Naive Bayes, Logistic Regression, etc.)
+scaler_std = StandardScaler()
+X_train_std = X_train.copy()
+X_test_std = X_test.copy()
+X_train_std[columns_to_scale] = scaler_std.fit_transform(X_train_std[columns_to_scale])
+X_test_std[columns_to_scale] = scaler_std.transform(X_test_std[columns_to_scale])
+
+# =========================================================
+# Train and Evaluate ALL Models
+# =========================================================
+
+results = []
+predictions_dict = {}
+detailed_metrics_dict = {}
+
+# 1. KNN
+print("Training KNN...")
+k_values = list(range(3, 20, 2))
+knn_scores = []
+for k in k_values:
+    knn = KNeighborsClassifier(n_neighbors=k)
+    scores = cross_val_score(knn, X_train_minmax, y_train, cv=5, scoring='accuracy')
+    knn_scores.append(scores.mean())
+best_k = k_values[np.argmax(knn_scores)]
+knn_model = KNeighborsClassifier(n_neighbors=best_k)
+metrics_knn, pred_knn = evaluate_model(knn_model, X_train_minmax, X_test_minmax, y_train, y_test, "KNN")
+if metrics_knn:
+    results.append(metrics_knn)
+    predictions_dict['KNN'] = pred_knn
+    detailed_metrics_dict['KNN'] = metrics_knn
+    print(f"  Best k: {best_k}, Accuracy: {metrics_knn['Accuracy']:.4f}")
+
+# 2. Gaussian Naive Bayes
+print("Training Naive Bayes...")
+nb_model = GaussianNB()
+metrics_nb, pred_nb = evaluate_model(nb_model, X_train_std, X_test_std, y_train, y_test, "Naive Bayes")
+if metrics_nb:
+    results.append(metrics_nb)
+    predictions_dict['Naive Bayes'] = pred_nb
+    detailed_metrics_dict['Naive Bayes'] = metrics_nb
+
+# 3. Decision Tree
+print("Training Decision Tree...")
+dt_model = DecisionTreeClassifier(random_state=42, max_depth=5)
+metrics_dt, pred_dt = evaluate_model(dt_model, X_train, X_test, y_train, y_test, "Decision Tree")
+if metrics_dt:
+    results.append(metrics_dt)
+    predictions_dict['Decision Tree'] = pred_dt
+    detailed_metrics_dict['Decision Tree'] = metrics_dt
+
+# 4. XGBoost
+print("Training XGBoost...")
+xgb_model = XGBClassifier(random_state=42, n_estimators=100, learning_rate=0.1, max_depth=3)
+metrics_xgb, pred_xgb = evaluate_model(xgb_model, X_train, X_test, y_train, y_test, "XGBoost")
+if metrics_xgb:
+    results.append(metrics_xgb)
+    predictions_dict['XGBoost'] = pred_xgb
+    detailed_metrics_dict['XGBoost'] = metrics_xgb
+
+# 5. Random Forest
+print("Training Random Forest...")
+rf_model = RandomForestClassifier(random_state=42, n_estimators=100, max_depth=5)
+metrics_rf, pred_rf = evaluate_model(rf_model, X_train, X_test, y_train, y_test, "Random Forest")
+if metrics_rf:
+    results.append(metrics_rf)
+    predictions_dict['Random Forest'] = pred_rf
+    detailed_metrics_dict['Random Forest'] = metrics_rf
+
+# 6. Logistic Regression
+print("Training Logistic Regression...")
+lr_model = LogisticRegression(random_state=42, max_iter=1000)
+metrics_lr, pred_lr = evaluate_model(lr_model, X_train_std, X_test_std, y_train, y_test, "Logistic Regression")
+if metrics_lr:
+    results.append(metrics_lr)
+    predictions_dict['Logistic Regression'] = pred_lr
+    detailed_metrics_dict['Logistic Regression'] = metrics_lr
+
+# 7. SVM (Support Vector Machine)
+print("Training SVM...")
+svm_model = SVC(random_state=42, kernel='rbf', probability=True)
+metrics_svm, pred_svm = evaluate_model(svm_model, X_train_std, X_test_std, y_train, y_test, "SVM")
+if metrics_svm:
+    results.append(metrics_svm)
+    predictions_dict['SVM'] = pred_svm
+    detailed_metrics_dict['SVM'] = metrics_svm
+
+# 8. J48 Tree
+print("Training J48 Tree...")
+j48_model = J48Tree(criterion='entropy', max_depth=5)
+metrics_j48, pred_j48 = evaluate_model(j48_model, X_train, X_test, y_train, y_test, "J48 Tree")
+if metrics_j48:
+    results.append(metrics_j48)
+    predictions_dict['J48 Tree'] = pred_j48
+    detailed_metrics_dict['J48 Tree'] = metrics_j48
+
+# 9. Gini Tree
+print("Training Gini Tree...")
+gini_model = GiniTree(max_depth=5)
+metrics_gini, pred_gini = evaluate_model(gini_model, X_train, X_test, y_train, y_test, "Gini Tree")
+if metrics_gini:
+    results.append(metrics_gini)
+    predictions_dict['Gini Tree'] = pred_gini
+    detailed_metrics_dict['Gini Tree'] = metrics_gini
+
+# 10. Adaptive Naive Bayes
+print("Training Adaptive Naive Bayes...")
+adaptive_nb = AdaptiveNB()
+metrics_anb, pred_anb = evaluate_model(adaptive_nb, X_train_std, X_test_std, y_train, y_test, "Adaptive NB")
+if metrics_anb:
+    results.append(metrics_anb)
+    predictions_dict['Adaptive NB'] = pred_anb
+    detailed_metrics_dict['Adaptive NB'] = metrics_anb
+
+# 11. OneR
+print("Training OneR...")
+oner_model = OneRClassifier()
+metrics_oner, pred_oner = evaluate_model(oner_model, X_train, X_test, y_train, y_test, "OneR")
+if metrics_oner:
+    results.append(metrics_oner)
+    predictions_dict['OneR'] = pred_oner
+    detailed_metrics_dict['OneR'] = metrics_oner
+
+# 12. Perceptron
+print("Training Perceptron...")
+perceptron_model = Perceptron(random_state=42, max_iter=1000, tol=1e-3)
+metrics_perc, pred_perc = evaluate_model(perceptron_model, X_train_std, X_test_std, y_train, y_test, "Perceptron")
+if metrics_perc:
+    results.append(metrics_perc)
+    predictions_dict['Perceptron'] = pred_perc
+    detailed_metrics_dict['Perceptron'] = metrics_perc
+
+# 13. Nearest Centroid
+print("Training Nearest Centroid...")
+nc_model = NearestCentroid()
+metrics_nc, pred_nc = evaluate_model(nc_model, X_train_std, X_test_std, y_train, y_test, "Nearest Centroid")
+if metrics_nc:
+    results.append(metrics_nc)
+    predictions_dict['Nearest Centroid'] = pred_nc
+    detailed_metrics_dict['Nearest Centroid'] = metrics_nc
+
+# 14. K-Means (modified for classification)
+print("Training K-Means (for classification)...")
+kmeans = KMeans(n_clusters=2, random_state=42)
+kmeans.fit(X_train_std)
+train_clusters = kmeans.predict(X_train_std)
+# Map clusters to classes based on training data
+cluster_to_class = {}
+for cluster in np.unique(train_clusters):
+    mask = train_clusters == cluster
+    if np.sum(mask) > 0:
+        cluster_to_class[cluster] = np.bincount(y_train[mask]).argmax()
+test_clusters = kmeans.predict(X_test_std)
+y_pred_kmeans = np.array([cluster_to_class[cluster] for cluster in test_clusters])
+metrics_kmeans = {
+    'Model': "K-Means",
+    'Accuracy': accuracy_score(y_test, y_pred_kmeans),
+    'Precision': precision_score(y_test, y_pred_kmeans, average='weighted'),
+    'Recall': recall_score(y_test, y_pred_kmeans, average='weighted'),
+    'F1': f1_score(y_test, y_pred_kmeans, average='weighted')
+}
+results.append(metrics_kmeans)
+predictions_dict['K-Means'] = y_pred_kmeans
+detailed_metrics_dict['K-Means'] = metrics_kmeans
+
+# 15. ZeroR (Baseline)
+print("Training ZeroR (Baseline)...")
+zeror_model = DummyClassifier(strategy='most_frequent')
+metrics_zeror, pred_zeror = evaluate_model(zeror_model, X_train, X_test, y_train, y_test, "ZeroR")
+if metrics_zeror:
+    results.append(metrics_zeror)
+    predictions_dict['ZeroR'] = pred_zeror
+    detailed_metrics_dict['ZeroR'] = metrics_zeror
+
+# 16. Decision Stump
+print("Training Decision Stump...")
+stump_model = DecisionStump(criterion='gini')
+metrics_stump, pred_stump = evaluate_model(stump_model, X_train, X_test, y_train, y_test, "Decision Stump")
+if metrics_stump:
+    results.append(metrics_stump)
+    predictions_dict['Decision Stump'] = pred_stump
+    detailed_metrics_dict['Decision Stump'] = metrics_stump
+
+# 17. AdaBoost (as alternative to JRip)
+print("Training AdaBoost...")
+adaboost_model = AdaBoostClassifier(n_estimators=50, random_state=42)
+metrics_ada, pred_ada = evaluate_model(adaboost_model, X_train, X_test, y_train, y_test, "AdaBoost")
+if metrics_ada:
+    results.append(metrics_ada)
+    predictions_dict['AdaBoost'] = pred_ada
+    detailed_metrics_dict['AdaBoost'] = metrics_ada
+
+# 18. Isolation Forest (for anomaly detection, modified for binary classification)
+print("Training Isolation Forest...")
+iso_forest = IsolationForest(random_state=42, contamination=0.1)
+iso_forest.fit(X_train_std)
+train_preds = iso_forest.predict(X_train_std)
+# Map -1 (anomaly) and 1 (normal) to 0 and 1
+train_preds = np.where(train_preds == -1, 0, 1)
+# Find the mapping that gives best accuracy
+if accuracy_score(y_train, train_preds) < 0.5:
+    # Reverse the mapping
+    train_preds = 1 - train_preds
+test_preds = iso_forest.predict(X_test_std)
+test_preds = np.where(test_preds == -1, 0, 1)
+# Apply same mapping as training
+if accuracy_score(y_train, train_preds) < 0.5:
+    test_preds = 1 - test_preds
+metrics_iso = {
+    'Model': "Isolation Forest",
+    'Accuracy': accuracy_score(y_test, test_preds),
+    'Precision': precision_score(y_test, test_preds, average='weighted'),
+    'Recall': recall_score(y_test, test_preds, average='weighted'),
+    'F1': f1_score(y_test, test_preds, average='weighted')
+}
+results.append(metrics_iso)
+predictions_dict['Isolation Forest'] = test_preds
+detailed_metrics_dict['Isolation Forest'] = metrics_iso
+
+# 19. LibSVM (Linear SVM)
+print("Training LibSVM (Linear SVM)...")
+libsvm_model = LinearSVC(random_state=42, max_iter=10000)
+metrics_libsvm, pred_libsvm = evaluate_model(libsvm_model, X_train_std, X_test_std, y_train, y_test, "LibSVM")
+if metrics_libsvm:
+    results.append(metrics_libsvm)
+    predictions_dict['LibSVM'] = pred_libsvm
+    detailed_metrics_dict['LibSVM'] = metrics_libsvm
+
+# 20. Custom KNN
+print("Training Custom KNN...")
+custom_knn = CustomKNN(k=best_k)
+metrics_cknn, pred_cknn = evaluate_model(custom_knn, X_train_minmax, X_test_minmax, y_train, y_test, "Custom KNN")
+if metrics_cknn:
+    results.append(metrics_cknn)
+    predictions_dict['Custom KNN'] = pred_cknn
+    detailed_metrics_dict['Custom KNN'] = metrics_cknn
+
+# =========================================================
+# Create Results DataFrame
+# =========================================================
+
+results_df = pd.DataFrame(results)
+# Store original float values before formatting
+float_results_df = results_df.copy()
+
+# Sort by Accuracy (using float values)
+float_results_df = float_results_df.sort_values('Accuracy', ascending=False)
+results_df = results_df.reindex(float_results_df.index)
+
+# Format metrics to 4 decimal places
+for col in ['Accuracy', 'Precision', 'Recall', 'F1']:
+    results_df[col] = results_df[col].apply(lambda x: f"{x:.4f}")
+
+print("\n" + "="*80)
+print("COMPREHENSIVE MODEL COMPARISON")
+print("="*80)
+print(results_df.to_string(index=False))
+
+# =========================================================
+# VISUALIZATION 1: All Metrics for Top 10 Models
+# =========================================================
+
+print("\n" + "="*80)
+print("VISUALIZATION 1: ALL METRICS FOR TOP 10 MODELS")
+print("="*80)
+
+# Get top 10 models
+top_10_models = float_results_df.head(10)['Model'].tolist()
+top_10_df = float_results_df.head(10).copy()
+
+# Create figure with subplots
+fig1, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+
+# Color palette
+colors = plt.cm.Set3(np.linspace(0, 1, 4))
+metric_colors = {'Accuracy': '#1f77b4', 'Precision': '#ff7f0e', 'Recall': '#2ca02c', 'F1': '#d62728'}
+
+# 1. Horizontal bar chart - Accuracy
+y_pos = np.arange(len(top_10_df))
+ax1.barh(y_pos, top_10_df['Accuracy'], color=metric_colors['Accuracy'], alpha=0.8)
+ax1.set_yticks(y_pos)
+ax1.set_yticklabels(top_10_df['Model'])
+ax1.set_xlabel('Accuracy Score')
+ax1.set_title('Top 10 Models by Accuracy')
+ax1.set_xlim([0, 1])
+# Add value labels
+for i, v in enumerate(top_10_df['Accuracy']):
+    ax1.text(v + 0.01, i, f'{v:.3f}', va='center', fontweight='bold')
+
+# 2. Horizontal bar chart - F1 Score
+ax2.barh(y_pos, top_10_df['F1'], color=metric_colors['F1'], alpha=0.8)
+ax2.set_yticks(y_pos)
+ax2.set_yticklabels(top_10_df['Model'])
+ax2.set_xlabel('F1 Score')
+ax2.set_title('Top 10 Models by F1 Score')
+ax2.set_xlim([0, 1])
+# Add value labels
+for i, v in enumerate(top_10_df['F1']):
+    ax2.text(v + 0.01, i, f'{v:.3f}', va='center', fontweight='bold')
+
+# 3. Grouped bar chart for all metrics
+x = np.arange(len(top_10_df))
+width = 0.2
+ax3.bar(x - 1.5*width, top_10_df['Accuracy'], width, label='Accuracy', color=metric_colors['Accuracy'], alpha=0.8)
+ax3.bar(x - 0.5*width, top_10_df['Precision'], width, label='Precision', color=metric_colors['Precision'], alpha=0.8)
+ax3.bar(x + 0.5*width, top_10_df['Recall'], width, label='Recall', color=metric_colors['Recall'], alpha=0.8)
+ax3.bar(x + 1.5*width, top_10_df['F1'], width, label='F1', color=metric_colors['F1'], alpha=0.8)
+ax3.set_xticks(x)
+ax3.set_xticklabels(top_10_df['Model'], rotation=45, ha='right')
+ax3.set_ylabel('Score')
+ax3.set_title('All Metrics Comparison for Top 10 Models')
+ax3.legend()
+ax3.set_ylim([0, 1])
+
+# 4. Radar/Spider chart for top 3 models
+ax4.axis('off')
+ax4.text(0.5, 0.95, 'Top 3 Models - Metric Comparison',
+         horizontalalignment='center', verticalalignment='center',
+         transform=ax4.transAxes, fontsize=14, fontweight='bold')
+
+# Create a mini table
+top_3_df = top_10_df.head(3)
+cell_text = []
+for idx, row in top_3_df.iterrows():
+    cell_text.append([
+        f"{row['Accuracy']:.3f}",
+        f"{row['Precision']:.3f}",
+        f"{row['Recall']:.3f}",
+        f"{row['F1']:.3f}"
+    ])
+
+# Create table
+table = ax4.table(cellText=cell_text,
+                  rowLabels=top_3_df['Model'].tolist(),
+                  colLabels=['Accuracy', 'Precision', 'Recall', 'F1'],
+                  cellLoc='center',
+                  loc='center')
+table.auto_set_font_size(False)
+table.set_fontsize(10)
+table.scale(1.2, 2)
+
+plt.tight_layout()
+plt.show()
+
+# =========================================================
+# VISUALIZATION 2: Heatmap of Metrics for Top 10 Models
+# =========================================================
+
+print("\n" + "="*80)
+print("VISUALIZATION 2: HEATMAP OF METRICS FOR TOP 10 MODELS")
+print("="*80)
+
+fig2, ax = plt.subplots(figsize=(12, 8))
+
+# Prepare data for heatmap
+heatmap_data = top_10_df[['Accuracy', 'Precision', 'Recall', 'F1']].values
+models = top_10_df['Model'].tolist()
+metrics = ['Accuracy', 'Precision', 'Recall', 'F1']
+
+# Create heatmap
+im = ax.imshow(heatmap_data, cmap='YlOrRd', aspect='auto')
+
+# Add colorbar
+cbar = ax.figure.colorbar(im, ax=ax)
+cbar.ax.set_ylabel('Score', rotation=-90, va="bottom")
+
+# Set ticks and labels
+ax.set_xticks(np.arange(len(metrics)))
+ax.set_yticks(np.arange(len(models)))
+ax.set_xticklabels(metrics)
+ax.set_yticklabels(models)
+
+# Rotate the tick labels and set their alignment
+plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+
+# Loop over data dimensions and create text annotations
+for i in range(len(models)):
+    for j in range(len(metrics)):
+        text = ax.text(j, i, f'{heatmap_data[i, j]:.3f}',
+                       ha="center", va="center", color="black" if heatmap_data[i, j] > 0.7 else "white",
+                       fontweight='bold')
+
+ax.set_title("Performance Metrics Heatmap - Top 10 Models")
+plt.tight_layout()
+plt.show()
+
+# =========================================================
+# VISUALIZATION 3: Confusion Matrices for Top 10 Models
+# =========================================================
+
+print("\n" + "="*80)
+print("VISUALIZATION 3: CONFUSION MATRICES FOR TOP 10 MODELS")
+print("="*80)
+
+# Create a 2x5 grid for confusion matrices
+fig3, axes = plt.subplots(2, 5, figsize=(20, 8))
+fig3.suptitle('Confusion Matrices - Top 10 Models', fontsize=16, fontweight='bold')
+
+# Flatten axes array for easy indexing
+axes = axes.ravel()
+
+for idx, model_name in enumerate(top_10_models[:10]):
+    if model_name in predictions_dict:
+        y_pred = predictions_dict[model_name]
+        cm = confusion_matrix(y_test, y_pred)
+
+        # Create heatmap
+        im = axes[idx].imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+        axes[idx].figure.colorbar(im, ax=axes[idx], fraction=0.046, pad=0.04)
+
+        # Set labels and title
+        axes[idx].set(xticks=np.arange(cm.shape[1]),
+                     yticks=np.arange(cm.shape[0]),
+                     xticklabels=['Class 0', 'Class 1'],
+                     yticklabels=['Class 0', 'Class 1'],
+                     title=f'{model_name}\nAcc: {float_results_df.iloc[idx]["Accuracy"]:.3f}',
+                     ylabel='True label',
+                     xlabel='Predicted label')
+
+        # Rotate x-axis labels
+        plt.setp(axes[idx].get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+
+        # Add text annotations
+        thresh = cm.max() / 2.
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                axes[idx].text(j, i, format(cm[i, j], 'd'),
+                             ha="center", va="center",
+                             color="white" if cm[i, j] > thresh else "black",
+                             fontweight='bold')
+    else:
+        axes[idx].axis('off')
+        axes[idx].text(0.5, 0.5, f'{model_name}\nNo predictions',
+                      ha='center', va='center', transform=axes[idx].transAxes)
+
+plt.tight_layout()
+plt.show()
+
+# =========================================================
+# VISUALIZATION 4: Parallel Coordinates Plot
+# =========================================================
+
+print("\n" + "="*80)
+print("VISUALIZATION 4: PARALLEL COORDINATES PLOT")
+print("="*80)
+
+fig4, ax = plt.subplots(figsize=(14, 8))
+
+# Prepare data
+parallel_data = top_10_df[['Accuracy', 'Precision', 'Recall', 'F1']].values
+models = top_10_df['Model'].tolist()
+
+# Create parallel coordinates
+dimensions = ['Accuracy', 'Precision', 'Recall', 'F1']
+xs = [i for i, _ in enumerate(dimensions)]
+
+# Create colors based on accuracy
+colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(models)))
+
+# Plot each model
+for i, (model, color) in enumerate(zip(models, colors)):
+    ys = parallel_data[i]
+    ax.plot(xs, ys, 'o-', color=color, label=model, linewidth=2, markersize=8, alpha=0.8)
+
+# Set x-ticks and labels
+ax.set_xticks(xs)
+ax.set_xticklabels(dimensions, fontsize=12)
+ax.set_ylabel('Score', fontsize=12)
+ax.set_title('Parallel Coordinates Plot - Top 10 Models', fontsize=14, fontweight='bold')
+ax.grid(True, alpha=0.3)
+ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
+ax.set_ylim([0, 1])
+
+plt.tight_layout()
+plt.show()
+
+# =========================================================
+# VISUALIZATION 5: Performance Summary Dashboard
+# =========================================================
+
+print("\n" + "="*80)
+print("VISUALIZATION 5: PERFORMANCE SUMMARY DASHBOARD")
+print("="*80)
+
+fig5 = plt.figure(figsize=(18, 12))
+gs = gridspec.GridSpec(3, 3, figure=fig5)
+
+# 1. Bar chart - All metrics for top 5 models
+ax1 = fig5.add_subplot(gs[0, :])
+top_5_df = top_10_df.head(5)
+x = np.arange(len(top_5_df))
+width = 0.2
+ax1.bar(x - 1.5*width, top_5_df['Accuracy'], width, label='Accuracy', color='#1f77b4', alpha=0.8)
+ax1.bar(x - 0.5*width, top_5_df['Precision'], width, label='Precision', color='#ff7f0e', alpha=0.8)
+ax1.bar(x + 0.5*width, top_5_df['Recall'], width, label='Recall', color='#2ca02c', alpha=0.8)
+ax1.bar(x + 1.5*width, top_5_df['F1'], width, label='F1', color='#d62728', alpha=0.8)
+ax1.set_xticks(x)
+ax1.set_xticklabels(top_5_df['Model'], rotation=0)
+ax1.set_ylabel('Score')
+ax1.set_title('Top 5 Models - Performance Metrics')
+ax1.legend()
+ax1.set_ylim([0, 1])
+
+# 2. Pie chart - Model type distribution in top 10
+ax2 = fig5.add_subplot(gs[1, 0])
+# Categorize models
+model_categories = {
+    'Tree-based': ['Decision Tree', 'Random Forest', 'XGBoost', 'J48 Tree', 'Gini Tree', 'AdaBoost', 'Decision Stump'],
+    'Probabilistic': ['Naive Bayes', 'Adaptive NB'],
+    'Linear': ['Logistic Regression', 'Perceptron', 'LibSVM'],
+    'Instance-based': ['KNN', 'Nearest Centroid', 'Custom KNN'],
+    'Others': ['SVM', 'K-Means', 'Isolation Forest', 'OneR', 'ZeroR']
+}
+
+category_counts = {}
+for category, models_list in model_categories.items():
+    count = sum(1 for model in top_10_models if model in models_list)
+    if count > 0:
+        category_counts[category] = count
+
+colors_pie = plt.cm.Set3(np.linspace(0, 1, len(category_counts)))
+ax2.pie(category_counts.values(), labels=category_counts.keys(), autopct='%1.1f%%',
+        colors=colors_pie, startangle=90)
+ax2.set_title('Model Categories in Top 10')
+
+# 3. Scatter plot - Accuracy vs F1
+ax3 = fig5.add_subplot(gs[1, 1])
+scatter = ax3.scatter(top_10_df['Accuracy'], top_10_df['F1'],
+                     c=range(len(top_10_df)), cmap='viridis', s=150, alpha=0.7)
+ax3.set_xlabel('Accuracy')
+ax3.set_ylabel('F1 Score')
+ax3.set_title('Accuracy vs F1 Score')
+ax3.grid(True, alpha=0.3)
+# Add model labels
+for i, model in enumerate(top_10_df['Model']):
+    ax3.annotate(model, (top_10_df.iloc[i]['Accuracy'], top_10_df.iloc[i]['F1']),
+                fontsize=8, alpha=0.8)
+
+# 4. Line plot - Performance trends
+ax4 = fig5.add_subplot(gs[1, 2])
+metrics_to_plot = ['Accuracy', 'Precision', 'Recall', 'F1']
+for metric in metrics_to_plot:
+    ax4.plot(range(len(top_10_df)), top_10_df[metric], 'o-', label=metric, linewidth=2)
+ax4.set_xlabel('Model Rank')
+ax4.set_ylabel('Score')
+ax4.set_title('Performance Trends Across Top 10 Models')
+ax4.legend()
+ax4.set_xticks(range(len(top_10_df)))
+ax4.set_xticklabels([f'#{i+1}' for i in range(len(top_10_df))], rotation=45)
+ax4.grid(True, alpha=0.3)
+
+# 5. Summary statistics
+ax5 = fig5.add_subplot(gs[2, :])
+ax5.axis('off')
+summary_text = []
+summary_text.append("TOP 10 MODELS - SUMMARY STATISTICS")
+summary_text.append("="*40)
+summary_text.append(f"Best Accuracy: {top_10_df['Accuracy'].max():.3f} ({top_10_df.iloc[0]['Model']})")
+summary_text.append(f"Worst Accuracy in Top 10: {top_10_df['Accuracy'].min():.3f} ({top_10_df.iloc[-1]['Model']})")
+summary_text.append(f"Average Accuracy: {top_10_df['Accuracy'].mean():.3f}")
+summary_text.append(f"Average F1 Score: {top_10_df['F1'].mean():.3f}")
+summary_text.append(f"Average Precision: {top_10_df['Precision'].mean():.3f}")
+summary_text.append(f"Average Recall: {top_10_df['Recall'].mean():.3f}")
+summary_text.append("")
+summary_text.append("TOP 3 MODELS:")
+for i in range(3):
+    model = top_10_df.iloc[i]
+    summary_text.append(f"{i+1}. {model['Model']}: Acc={model['Accuracy']:.3f}, F1={model['F1']:.3f}")
+
+# Display summary text
+ax5.text(0.1, 0.95, '\n'.join(summary_text),
+         verticalalignment='top', horizontalalignment='left',
+         transform=ax5.transAxes, fontsize=11,
+         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+plt.tight_layout()
+plt.show()
+
+# =========================================================
+# Print detailed report for top 10 models
+# =========================================================
+
+print("\n" + "="*80)
+print("DETAILED CLASSIFICATION REPORTS FOR TOP 10 MODELS")
+print("="*80)
+
+for idx, model_name in enumerate(top_10_models[:10]):
+    if model_name in predictions_dict:
+        print(f"\n{'='*60}")
+        print(f"MODEL #{idx+1}: {model_name}")
+        print(f"{'='*60}")
+        y_pred = predictions_dict[model_name]
+        print("Classification Report:")
+        print(classification_report(y_test, y_pred))
+        print("Confusion Matrix:")
+        cm = confusion_matrix(y_test, y_pred)
+        print(cm)
+        print(f"\nKey Metrics:")
+        print(f"  Accuracy : {detailed_metrics_dict[model_name]['Accuracy']:.4f}")
+        print(f"  Precision: {detailed_metrics_dict[model_name]['Precision']:.4f}")
+        print(f"  Recall   : {detailed_metrics_dict[model_name]['Recall']:.4f}")
+        print(f"  F1 Score : {detailed_metrics_dict[model_name]['F1']:.4f}")
+
+# =========================================================
+# Save results to CSV
+# =========================================================
+
+# Save formatted results
+results_df.to_csv('/content/drive/MyDrive/model_comparison_results_formatted.csv', index=False)
+
+# Save detailed results with float values
+float_results_df.to_csv('/content/drive/MyDrive/model_comparison_results_detailed.csv', index=False)
+
+print("\nResults saved to:")
+print("  /content/drive/MyDrive/model_comparison_results_formatted.csv")
+print("  /content/drive/MyDrive/model_comparison_results_detailed.csv")
+
+print("\n" + "="*80)
+print("ANALYSIS COMPLETE!")
+print("="*80)
+print(f"✓ Total models evaluated: {len(results)}")
+print(f"✓ Best model: {float_results_df.iloc[0]['Model']} with accuracy: {float_results_df.iloc[0]['Accuracy']:.4f}")
+print(f"✓ Models above 80% accuracy: {len(float_results_df[float_results_df['Accuracy'] > 0.8])}")
+print("="*80)
